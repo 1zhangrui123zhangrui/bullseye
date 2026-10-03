@@ -18,7 +18,8 @@
     "raw_material": {
       "max_targets": 2,
       "roi_capture": [52, 0, 546, 290],
-      "plate_ellipse_capture": null
+      "plate_ellipse_capture": [323.53, 5.01, 261.62, 283.92, 168.95],
+      "plate_margin_capture": 8.0
     },
     "processing_area": {
       "max_targets": 3,
@@ -54,6 +55,19 @@
   "tracking": {
     "alpha": 0.55,
     "max_missed": 3,
-    "stable_frames": 3
+    "stable_frames": 3,
+    "still_center_px": 1.5
+  },
+  "top_refine": {
+    "enabled": true,
+    "every_n_still_frames": 4,
+    "circle_threshold": 2200,
+    "min_radius_ratio": 0.16,
+    "max_radius_ratio": 1.00,
+    "center_tolerance_ratio": 0.55,
+    "roi_margin": 8,
+    "min_magnitude": 0.0,
+    "color_min_fill": 0.08,
+    "color_min_margin": 0.08
   }
 }

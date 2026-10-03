@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from math import hypot
+from math import cos, hypot, radians, sin
 
 
 @dataclass
@@ -17,6 +17,9 @@ class Material:
     predicted: bool = False
     hits: int = 0
     missed: int = 0
+    still_frames: int = 0
+    refined: bool = False
+    center_source: str = "blob"
 
 
 DEFAULT_THRESHOLDS = {
@@ -28,6 +31,25 @@ DEFAULT_THRESHOLDS = {
     "black": [0, 32, -32, 32, -38, 38],
     "light_blue": [24, 100, -42, 30, -68, 18],
 }
+
+
+def box_overlap(a, b):
+    """Intersection relative to the smaller box, including nested masks."""
+    width = max(0, min(a.x + a.w, b.x + b.w) - max(a.x, b.x))
+    height = max(0, min(a.y + a.h, b.y + b.h) - max(a.y, b.y))
+    return width * height / float(max(1, min(a.w * a.h, b.w * b.h)))
+
+
+def circle_value(circle, name, index):
+    value = getattr(circle, name, None)
+    if callable(value):
+        value = value()
+    if value is not None:
+        return value
+    try:
+        return circle[index]
+    except (IndexError, KeyError, TypeError):
+        return None
 
 
 class NativeMaterialDetector:
@@ -49,6 +71,16 @@ class NativeMaterialDetector:
         self.min_aspect = float(native.get("min_aspect", 0.30))
         self.max_aspect = float(native.get("max_aspect", 3.20))
         self.duplicate_distance = float(native.get("duplicate_distance", 24))
+        top = config.get("top_refine", {})
+        self.top_refine_enabled = bool(top.get("enabled", True))
+        self.top_refine_threshold = int(top.get("circle_threshold", 2200))
+        self.top_refine_min_radius = float(top.get("min_radius_ratio", 0.16))
+        self.top_refine_max_radius = float(top.get("max_radius_ratio", 0.72))
+        self.top_refine_center_tolerance = float(top.get("center_tolerance_ratio", 0.55))
+        self.top_refine_margin = int(top.get("roi_margin", 8))
+        self.top_refine_min_magnitude = float(top.get("min_magnitude", 0.0))
+        self.top_color_min_fill = float(top.get("color_min_fill", 0.08))
+        self.top_color_min_margin = float(top.get("color_min_margin", 0.08))
         self.mode = config.get("detection", {}).get("scene_mode", "raw_material")
 
     def set_scene_mode(self, mode):
@@ -107,16 +139,39 @@ class NativeMaterialDetector:
             cx, cy = x + w * 0.5, y + h * 0.5
         return x, y, w, h, max(0, pixels), cx, cy
 
-    def _inside_plate(self, cx, cy, roi):
+    def _ellipse_value(self, px, py, ellipse):
+        if len(ellipse) < 4:
+            return 0.0
+        ecx, ecy, rx, ry = [float(v) for v in ellipse[:4]]
+        angle = float(ellipse[4]) if len(ellipse) >= 5 else 0.0
+        if rx <= 0 or ry <= 0:
+            return 0.0
+        theta = radians(angle)
+        dx, dy = px - ecx, py - ecy
+        local_x = dx * cos(theta) + dy * sin(theta)
+        local_y = -dx * sin(theta) + dy * cos(theta)
+        return (local_x / rx) ** 2 + (local_y / ry) ** 2
+
+    def _inside_plate(self, x, y, w, h):
         ellipse = self._scene().get("plate_ellipse_capture")
         if not ellipse:
             return True
-        ecx, ecy, rx, ry = [float(v) for v in ellipse]
-        if rx <= 0 or ry <= 0:
-            return True
-        return ((cx - ecx) / rx) ** 2 + ((cy - ecy) / ry) ** 2 <= 1.0
+        margin = float(self._scene().get("plate_margin_capture", 6.0))
+        values = [float(v) for v in ellipse]
+        values[2] = max(1.0, values[2] - margin)
+        values[3] = max(1.0, values[3] - margin)
+        # Require the complete bounding box to remain on the plate. This is
+        # stricter than testing only the center and rejects edge/background
+        # blobs without touching the color pipeline.
+        corners = (
+            (x, y),
+            (x + w - 1, y),
+            (x, y + h - 1),
+            (x + w - 1, y + h - 1),
+        )
+        return all(self._ellipse_value(x, y, values) <= 1.0 for x, y in corners)
 
-    def _candidate(self, color, color_id, blob, roi):
+    def _candidate(self, color, color_id, blob):
         x, y, w, h, pixels, cx, cy = self._blob_values(blob)
         if w <= 0 or h <= 0:
             return None
@@ -127,7 +182,7 @@ class NativeMaterialDetector:
             return None
         if not self.min_aspect <= aspect <= self.max_aspect or fill < self.min_fill:
             return None
-        if not self._inside_plate(cx, cy, roi):
+        if not self._inside_plate(x, y, w, h):
             return None
         confidence = min(1.0, 0.45 * min(1.0, fill) + 0.55 * min(1.0, pixels / 900.0))
         return Material(color, color_id, x, y, w, h, pixels, cx, cy, confidence)
@@ -191,12 +246,13 @@ class NativeMaterialDetector:
                 # path rather than guessing a color label.
                 return None
             code_value = int(code_value)
-            if code_value == 0:
-                code_value = 1
+            # Do not turn an absent or ambiguous label into a guessed color.
+            if code_value <= 0 or code_value & (code_value - 1):
+                continue
             for index, name in enumerate(names):
                 if code_value & (1 << index):
                     spec = self.colors[name]
-                    item = self._candidate(name, int(spec.get("id", index + 1)), blob, roi)
+                    item = self._candidate(name, int(spec.get("id", index + 1)), blob)
                     if item is not None:
                         results.append(item)
         return results
@@ -206,8 +262,16 @@ class NativeMaterialDetector:
         accepted = []
         for item in materials:
             duplicate = False
-            for previous in accepted:
-                if hypot(item.u - previous.u, item.v - previous.v) < self.duplicate_distance:
+            for index, previous in enumerate(accepted):
+                overlap = box_overlap(item, previous)
+                if overlap >= 0.55 or hypot(item.u - previous.u, item.v - previous.v) < self.duplicate_distance:
+                    # A substantial colored region inside a dark mask is
+                    # stronger color evidence than its shaded side wall.
+                    if overlap >= 0.55:
+                        if previous.color == "black" and item.color != "black" and item.pixels >= previous.pixels * 0.5:
+                            accepted[index] = item
+                        elif item.color == "black" and previous.color != "black" and previous.pixels < item.pixels * 0.5:
+                            accepted[index] = item
                     duplicate = True
                     break
             if not duplicate:
@@ -229,7 +293,7 @@ class NativeMaterialDetector:
                     blobs = []
                 color_id = int(spec.get("id", len(materials) + 1))
                 for blob in blobs:
-                    item = self._candidate(name, color_id, blob, roi)
+                    item = self._candidate(name, color_id, blob)
                     if item is not None:
                         materials.append(item)
 
@@ -238,14 +302,131 @@ class NativeMaterialDetector:
         max_targets = int(self._scene().get("max_targets", 2))
         return sorted(materials[:max_targets], key=lambda item: item.color_id)
 
+    def _find_top_circle(self, image, item):
+        """Find one top-face circle in a small candidate ROI, only on still frames."""
+        finder = getattr(image, "find_circles", None)
+        if not callable(finder):
+            return None
+        margin = self.top_refine_margin
+        x = max(0, item.x - margin)
+        y = max(0, item.y - margin)
+        right = min(image.width(), item.x + item.w + margin)
+        bottom = min(image.height(), item.y + item.h + margin)
+        roi = [x, y, max(1, right - x), max(1, bottom - y)]
+        radius = max(2.0, min(item.w, item.h) * 0.5)
+        r_min = max(2, int(radius * self.top_refine_min_radius))
+        r_max = max(r_min + 1, int(radius * self.top_refine_max_radius))
+        try:
+            circles = finder(
+                threshold=self.top_refine_threshold,
+                x_stride=2,
+                y_stride=2,
+                roi=roi,
+                r_min=r_min,
+                r_max=r_max,
+                r_step=2,
+            )
+        except TypeError:
+            try:
+                circles = finder(self.top_refine_threshold, 2, 2, roi, r_min, r_max, 2)
+            except (TypeError, ValueError):
+                return None
+        except (RuntimeError, ValueError):
+            return None
+        best = None
+        for circle in circles or []:
+            cx = circle_value(circle, "x", 0)
+            cy = circle_value(circle, "y", 1)
+            cr = circle_value(circle, "r", 2)
+            magnitude = circle_value(circle, "magnitude", 3)
+            if None in (cx, cy, cr):
+                continue
+            cx, cy, cr = float(cx), float(cy), float(cr)
+            if magnitude is not None and float(magnitude) < self.top_refine_min_magnitude:
+                continue
+            distance = hypot(cx - item.u, cy - item.v)
+            if distance > max(item.w, item.h) * self.top_refine_center_tolerance:
+                continue
+            score = (float(magnitude or 1.0), -distance, cr)
+            if best is None or score > best[0]:
+                best = (score, cx, cy, cr)
+        return best
+
+    def refine_top(self, image, materials):
+        """Refine stable candidates; the caller must decide when the scene is still."""
+        if not self.top_refine_enabled:
+            return materials
+        for item in materials:
+            result = self._find_top_circle(image, item)
+            if result is None:
+                continue
+            _, cx, cy, radius = result
+            item.u, item.v = cx, cy
+            item.x = int(round(cx - radius))
+            item.y = int(round(cy - radius))
+            item.w = max(1, int(round(radius * 2)))
+            item.h = item.w
+            item.refined = True
+            item.center_source = "top_circle"
+            color = self._classify_top(image, item, radius)
+            if color is not None:
+                item.color = color
+                item.color_id = int(self.colors[color].get("id", item.color_id))
+        return materials
+
+    def _classify_top(self, image, item, radius):
+        """Score LAB thresholds only inside the refined top-face patch."""
+        half = max(2, int(round(radius * 0.42)))
+        x = max(0, int(round(item.u - half)))
+        y = max(0, int(round(item.v - half)))
+        right = min(image.width(), x + half * 2 + 1)
+        bottom = min(image.height(), y + half * 2 + 1)
+        roi = [x, y, max(1, right - x), max(1, bottom - y)]
+        scores = []
+        for name in self.color_names:
+            threshold = self.thresholds.get(name)
+            if threshold is None:
+                continue
+            try:
+                blobs = image.find_blobs(
+                    [threshold], roi=roi, x_stride=1, y_stride=1,
+                    area_threshold=3, pixels_threshold=3, merge=False,
+                )
+            except TypeError:
+                try:
+                    blobs = image.find_blobs(
+                        [threshold], roi=roi, x_stride=1, y_stride=1,
+                        area_threshold=3, pixels_threshold=3,
+                    )
+                except (RuntimeError, ValueError):
+                    blobs = []
+            except (RuntimeError, ValueError):
+                blobs = []
+            pixels = 0
+            for blob in blobs or []:
+                try:
+                    pixels += self._blob_values(blob)[4]
+                except (ValueError, TypeError):
+                    continue
+            scores.append((pixels / float(max(1, roi[2] * roi[3])), name))
+        if not scores:
+            return None
+        scores.sort(reverse=True)
+        best, name = scores[0]
+        second = scores[1][0] if len(scores) > 1 else 0.0
+        if best < self.top_color_min_fill or best - second < self.top_color_min_margin:
+            return None
+        return name
+
 
 class MaterialTracker:
-    """Small EMA tracker with a short hold window for transient missed blobs."""
+    """Keep short association memory; publish only this frame's observations."""
 
-    def __init__(self, alpha=0.55, max_missed=3, stable_frames=3):
+    def __init__(self, alpha=0.55, max_missed=3, stable_frames=3, still_center_px=1.5):
         self.alpha = float(alpha)
         self.max_missed = int(max_missed)
         self.stable_frames = int(stable_frames)
+        self.still_center_px = float(still_center_px)
         self.items = {}
 
     def update(self, detections):
@@ -253,16 +434,22 @@ class MaterialTracker:
         output = []
         for item in detections:
             previous = self.items.get(item.color)
-            if previous is not None:
+            if previous is not None and box_overlap(item, previous) >= 0.25:
+                movement = hypot(item.u - previous.u, item.v - previous.v)
+                old_u, old_v = item.u, item.v
                 item.u = previous.u + self.alpha * (item.u - previous.u)
                 item.v = previous.v + self.alpha * (item.v - previous.v)
-                item.x = int(round(item.u - item.w * 0.5))
-                item.y = int(round(item.v - item.h * 0.5))
+                item.x += int(round(item.u - old_u))
+                item.y += int(round(item.v - old_v))
                 hits = previous.hits + 1
+                still_frames = previous.still_frames + 1 if movement <= self.still_center_px else 0
             else:
                 hits = 1
+                still_frames = 0
             item.hits = hits
+            item.still_frames = still_frames
             item.missed = 0
+            item.predicted = False
             self.items[item.color] = item
             seen.add(item.color)
             output.append(item)
@@ -273,11 +460,13 @@ class MaterialTracker:
             previous.missed += 1
             if previous.missed <= self.max_missed:
                 previous.predicted = True
-                previous.confidence *= 0.85
-                output.append(previous)
             else:
                 del self.items[color]
         return output
 
     def stable(self, item):
-        return getattr(item, "hits", 0) >= self.stable_frames and not item.predicted
+        return (
+            getattr(item, "hits", 0) >= self.stable_frames
+            and getattr(item, "still_frames", 0) >= self.stable_frames
+            and not item.predicted
+        )

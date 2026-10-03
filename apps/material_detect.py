@@ -11,7 +11,7 @@ from vision.native_material import MaterialTracker, NativeMaterialDetector
 
 
 CONFIG_PATH = PROJECT_ROOT / "config" / "material_native.json"
-BUILD_ID = "RAW_MATERIAL_NATIVE_V1"
+BUILD_ID = "MATERIAL_NATIVE_V3_TOP_STABLE"
 
 
 def load_config():
@@ -41,6 +41,8 @@ def draw_results(img, detections, detector, source_size, fps):
         color = image.COLOR_ORANGE if item.predicted else image.COLOR_GREEN
         img.draw_rect(x, y, int(item.w), int(item.h), color, thickness=2)
         img.draw_cross(int(item.u), int(item.v), image.COLOR_BLUE, size=10, thickness=2)
+        if item.refined:
+            img.draw_circle(int(item.u), int(item.v), max(2, int(item.w * 0.5)), color, thickness=2)
         label = "%s %d,%d" % (
             item.color,
             int(round(item.u * sx)),
@@ -66,23 +68,35 @@ def main():
     configure_camera(cam, camera_cfg)
 
     detector = NativeMaterialDetector(config)
+    print("VISION_BUILD=" + BUILD_ID)
+    print("scene ROI:", config["scenes"][detector.mode])
     tracking = config.get("tracking", {})
     tracker = MaterialTracker(
         alpha=tracking.get("alpha", 0.55),
         max_missed=tracking.get("max_missed", 3),
         stable_frames=tracking.get("stable_frames", 3),
+        still_center_px=tracking.get("still_center_px", 1.5),
     )
     disp = display.Display()
     source_size = (int(camera_cfg["width"]), int(camera_cfg["height"]))
     last_ms = time.ticks_ms()
     fps = 0.0
+    frame_count = 0
 
     while not app.need_exit():
+        frame_count += 1
         frame = cam.read()
         if frame is None:
             continue
         detections = detector.detect(frame)
         detections = tracker.update(detections)
+        if detections and all(tracker.stable(item) for item in detections):
+            refine_every = max(1, int(config.get("top_refine", {}).get("every_n_still_frames", 4)))
+            if frame_count % refine_every == 0:
+                detections = detector.refine_top(frame, detections)
+                # Refinement may correct a color label; keep the tracker key
+                # aligned with the published material identity.
+                tracker.items = {item.color: item for item in detections}
 
         now = time.ticks_ms()
         dt = max(1, now - last_ms)
