@@ -1,0 +1,29 @@
+__pycache__/
+output*/
+models/*.pt
+models/*_labels.txt
+color_profiles.json
+*.log
+*.py[cod]
+*$py.class
+
+# Local/offline validation data must never be uploaded to MaixVision.
+_tmp/
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.jsonl
+*.log
+
+# Computer-side validation artifacts; keep them outside the board project.
+output/
+output_*/
+debug_*.jpg
+output_*/
+__pycache__/
+*.pyc

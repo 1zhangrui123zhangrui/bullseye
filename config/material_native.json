@@ -1,0 +1,59 @@
+{
+  "camera": {
+    "width": 2560,
+    "height": 1440,
+    "capture_width": 640,
+    "capture_height": 360,
+    "fps": 60,
+    "buffer_count": 1,
+    "warmup_frames": 15,
+    "exposure_us": null,
+    "gain": null,
+    "white_balance_gain": null
+  },
+  "detection": {
+    "scene_mode": "raw_material"
+  },
+  "scenes": {
+    "raw_material": {
+      "max_targets": 2,
+      "roi_capture": [52, 0, 546, 290],
+      "plate_ellipse_capture": null
+    },
+    "processing_area": {
+      "max_targets": 3,
+      "roi_capture": [0, 12, 640, 336],
+      "plate_ellipse_capture": null
+    }
+  },
+  "native_material": {
+    "min_pixels": 80,
+    "min_box_area": 280,
+    "max_box_area": 18000,
+    "min_fill": 0.18,
+    "min_aspect": 0.30,
+    "max_aspect": 3.20,
+    "duplicate_distance": 24,
+    "lab_thresholds": {
+      "red": [12, 58, 24, 82, 0, 64],
+      "yellow": [42, 100, -34, 24, 38, 108],
+      "blue": [4, 52, 12, 72, -104, -24],
+      "green": [18, 88, -86, -12, 0, 72],
+      "black": [0, 32, -32, 32, -38, 38],
+      "light_blue": [24, 100, -42, 30, -68, 18]
+    }
+  },
+  "colors": {
+    "red": {"id": 1},
+    "yellow": {"id": 2},
+    "blue": {"id": 3},
+    "green": {"id": 4},
+    "black": {"id": 5},
+    "light_blue": {"id": 6}
+  },
+  "tracking": {
+    "alpha": 0.55,
+    "max_missed": 3,
+    "stable_frames": 3
+  }
+}

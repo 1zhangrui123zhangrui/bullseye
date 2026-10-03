@@ -1,0 +1,10 @@
+{
+  "model": "/root/models/model_9512.mud",
+  "confidence": 0.20,
+  "iou": 0.45,
+  "display_width": 480,
+  "display_height": 480,
+  "print_interval_frames": 10,
+  "stable_frames": 3,
+  "stable_center_px": 12.0
+}
